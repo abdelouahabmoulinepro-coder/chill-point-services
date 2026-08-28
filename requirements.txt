@@ -1,0 +1,4 @@
+streamlit==1.62.0
+argon2-cffi>=25.1,<26
+pandas==3.0.5
+reportlab==5.0.1

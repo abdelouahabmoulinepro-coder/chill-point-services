@@ -1,0 +1,12 @@
+services:
+  gestion-commerciale:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      - chill-point-data:/app/data
+      - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+
+volumes:
+  chill-point-data:
