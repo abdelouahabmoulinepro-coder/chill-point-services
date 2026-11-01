@@ -16,7 +16,7 @@ import threading
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from core import database
@@ -41,6 +41,14 @@ class PostgresIntegrationTest(unittest.TestCase):
             }
         )
         return customer_id, code
+
+    def test_auth_session_revocation(self):
+        fingerprint = uuid.uuid4().hex + uuid.uuid4().hex
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        database.create_auth_session(fingerprint, now + timedelta(minutes=10))
+        self.assertTrue(database.is_auth_session_active(fingerprint, now))
+        database.revoke_auth_session(fingerprint)
+        self.assertFalse(database.is_auth_session_active(fingerprint, now))
 
     def test_workflow_and_new_process_persistence(self):
         customer_id, code = self.fake_customer()

@@ -29,12 +29,16 @@ def write_runtime_secrets(path: Path, url: str, project_ref: str) -> None:
     login_id = str(access.get("login_id", ""))
     display_name = str(access.get("display_name", "Dirigeant"))
     password_hash = str(access.get("password_hash", ""))
+    session_secret = str(access.get("session_secret", "")).strip()
+    if len(session_secret) < 32:
+        session_secret = secrets.token_urlsafe(48)
     content = (
         "# Secret de production généré localement et ignoré par Git.\n\n"
         "[access]\n"
         f"login_id = {json.dumps(login_id)}\n"
         f"display_name = {json.dumps(display_name)}\n"
-        f"password_hash = {json.dumps(password_hash)}\n\n"
+        f"password_hash = {json.dumps(password_hash)}\n"
+        f"session_secret = {json.dumps(session_secret)}\n\n"
         "[database]\n"
         'backend = "postgres"\n'
         f"project_ref = {json.dumps(project_ref)}\n"

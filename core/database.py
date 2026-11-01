@@ -30,7 +30,7 @@ from core.formatting import DOCUMENT_PATTERNS, STATUS_OPTIONS
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "gestion.db"
-POSTGRES_SCHEMA_VERSION = 1
+POSTGRES_SCHEMA_VERSION = 2
 LOGGER = logging.getLogger(__name__)
 _ACTIVE_POOLS: set[Any] = set()
 
@@ -145,6 +145,8 @@ def _postgres_query(query: str) -> str:
 def _sqlite_value(value: Any) -> Any:
     if isinstance(value, Decimal):
         return float(value)
+    if isinstance(value, datetime):
+        return value.isoformat(timespec="seconds")
     if isinstance(value, bool):
         return int(value)
     return value
@@ -384,6 +386,15 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS auth_sessions (
+                session_id_hash TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                revoked_at TEXT,
+                CHECK (length(session_id_hash) = 64),
+                CHECK (expires_at > created_at)
+            );
+
             CREATE INDEX IF NOT EXISTS idx_documents_type_date
                 ON documents(doc_type, issue_date);
             CREATE INDEX IF NOT EXISTS idx_documents_customer
@@ -392,6 +403,8 @@ def init_db() -> None:
                 ON payments(document_id);
             CREATE INDEX IF NOT EXISTS idx_client_requests_status_date
                 ON client_requests(status, created_at);
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiry
+                ON auth_sessions(expires_at);
             """
         )
         for name, definition in {
@@ -427,6 +440,48 @@ def _insert_id(conn: _ConnectionAdapter, query: str, params: Iterable[Any]) -> i
         return int(row["id"])
     cursor = conn.execute(query, tuple(params))
     return int(cursor.lastrowid)
+
+
+def create_auth_session(session_id_hash: str, expires_at: datetime) -> None:
+    """Register only a one-way session identifier fingerprint server-side."""
+    now = datetime.now(timezone.utc)
+    with connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO auth_sessions
+                (session_id_hash, created_at, expires_at, revoked_at)
+            VALUES (?, ?, ?, NULL)
+            """,
+            (session_id_hash, now, expires_at),
+        )
+
+
+def is_auth_session_active(session_id_hash: str, now: datetime | None = None) -> bool:
+    checked_at = now or datetime.now(timezone.utc)
+    with connection() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 AS active
+            FROM auth_sessions
+            WHERE session_id_hash = ?
+              AND revoked_at IS NULL
+              AND expires_at > ?
+            """,
+            (session_id_hash, checked_at),
+        ).fetchone()
+    return row is not None
+
+
+def revoke_auth_session(session_id_hash: str) -> None:
+    with connection() as conn:
+        conn.execute(
+            """
+            UPDATE auth_sessions
+            SET revoked_at = ?
+            WHERE session_id_hash = ? AND revoked_at IS NULL
+            """,
+            (datetime.now(timezone.utc), session_id_hash),
+        )
 
 
 def get_settings() -> dict[str, Any]:

@@ -165,7 +165,18 @@ else:
         st.page_link(settings_page, label="Paramètres", icon=":material/settings:")
 
         st.caption(f"Connecté : {director['name']}")
-        st.button("Se déconnecter", icon=":material/logout:", on_click=logout_director)
+        if st.button("Se déconnecter", icon=":material/logout:"):
+            try:
+                logout_director()
+                st.info("Session fermée sur cet appareil.", icon=":material/logout:")
+            except DatabaseError:
+                st.warning(
+                    "La session locale est fermée, mais sa révocation serveur n’a pas pu être confirmée. "
+                    "Le jeton expirera automatiquement.",
+                    icon=":material/warning:",
+                )
+            # Let the cookie component finish deletion before the next automatic rerun.
+            st.stop()
         st.caption(f"Devise : {settings['currency']} · Version 1.2")
 
     st.title(f"{navigation.icon} {navigation.title}")

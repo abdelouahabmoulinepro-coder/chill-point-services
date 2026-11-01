@@ -24,6 +24,16 @@ Tous ces fichiers sont ignorés par Git. Le secret administrateur ne doit jamais
 .\.venv\Scripts\python.exe scripts\configurer_acces.py --output .streamlit\secrets.prod.toml
 ```
 
+Pour un accès déjà configuré, ajouter uniquement le secret de session sans saisir
+ni modifier le mot de passe :
+
+```powershell
+.\.venv\Scripts\python.exe scripts\configurer_acces.py --output .streamlit\secrets.prod.toml --ensure-session-secret
+```
+
+Le secret de session reste côté serveur. Il signe les jetons opaques de 12 heures
+et ne doit jamais être copié ailleurs que dans les secrets Streamlit.
+
 5. Appliquer le schéma et créer le rôle limité :
 
 ```powershell
