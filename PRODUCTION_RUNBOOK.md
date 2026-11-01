@@ -44,12 +44,13 @@ Installer la dépendance locale de chiffrement :
 ```
 
 Définir une phrase de chiffrement d'au moins 20 caractères dans un gestionnaire de
-secrets ou dans la variable temporaire `BACKUP_ENCRYPTION_PASSPHRASE`, puis lancer :
+secrets et dans `.streamlit/backup.prod.passphrase` (fichier ignoré), puis lancer :
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\backup_postgres.py `
   --secrets-file .streamlit\secrets.prod.toml `
-  --verify-restore --encrypt
+  --verify-restore --encrypt `
+  --passphrase-file .streamlit\backup.prod.passphrase
 ```
 
 Le script exécute `pg_dump`, restaure le dump dans PostgreSQL 15 isolé sous Docker,

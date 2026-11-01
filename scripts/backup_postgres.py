@@ -150,6 +150,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=ROOT_DIR / "backups")
     parser.add_argument("--verify-restore", action="store_true")
     parser.add_argument("--encrypt", action="store_true")
+    parser.add_argument("--passphrase-file", type=Path)
     args = parser.parse_args()
     config = load_database_config(args.secrets_file)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -159,7 +160,11 @@ def main() -> None:
         verify_restore(dump_path)
     final_path = dump_path
     if args.encrypt:
-        passphrase = os.environ.get("BACKUP_ENCRYPTION_PASSPHRASE", "")
+        passphrase = (
+            args.passphrase_file.read_text(encoding="utf-8").strip()
+            if args.passphrase_file
+            else os.environ.get("BACKUP_ENCRYPTION_PASSPHRASE", "")
+        )
         if len(passphrase) < 20:
             raise RuntimeError("BACKUP_ENCRYPTION_PASSPHRASE doit contenir au moins 20 caractères.")
         final_path = encrypt_dump(dump_path, passphrase)
