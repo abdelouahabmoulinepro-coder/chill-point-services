@@ -46,6 +46,7 @@ with left:
             st.info("Les ventes apparaîtront ici dès qu'une facture sera créée.", icon=":material/monitoring:")
         else:
             monthly = monthly.rename(columns={"month": "Mois", "invoiced": "Facturé", "collected": "Encaissé"})
+            monthly[["Facturé", "Encaissé"]] = monthly[["Facturé", "Encaissé"]].astype(float)
             st.bar_chart(monthly, x="Mois", y=["Facturé", "Encaissé"], y_label=f"Montant ({currency})")
 
 with right:
@@ -53,7 +54,7 @@ with right:
         st.subheader("Activité")
         st.metric("Factures", int(metrics["invoice_count"]))
         if metrics["invoiced"]:
-            rate = metrics["collected"] / metrics["invoiced"] * 100
+            rate = float(metrics["collected"] / metrics["invoiced"] * 100)
             st.metric("Taux d'encaissement", f"{rate:.1f} %")
             st.progress(min(rate / 100, 1), text="Part des factures encaissée")
         else:
@@ -66,6 +67,7 @@ with st.container(border=True):
         st.info("Commencez par ajouter un client, puis créez votre premier devis ou votre première facture.", icon=":material/lightbulb:")
     else:
         frame = pd.DataFrame(recent)[["number", "doc_type", "customer_name", "issue_date", "status", "total", "balance"]]
+        frame[["total", "balance"]] = frame[["total", "balance"]].astype(float)
         frame["doc_type"] = frame["doc_type"].map(DOCUMENT_LABELS)
         frame["issue_date"] = frame["issue_date"].map(french_date)
         frame.columns = ["Numéro", "Type", "Client", "Date", "Statut", "Total", "Solde"]

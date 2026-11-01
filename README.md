@@ -49,3 +49,7 @@ la mise en ligne, consultez `DEPLOIEMENT_WEB.md`.
 ## Données
 
 Les données sont stockées dans `data/gestion.db`. Utilisez régulièrement le bouton de sauvegarde dans la page **Paramètres**.
+
+La branche PostgreSQL conserve ce mode SQLite et ajoute un moteur explicitement
+configurable pour Supabase. Consultez `MIGRATION_POSTGRES.md` pour la configuration,
+les migrations, les tests et les sauvegardes.

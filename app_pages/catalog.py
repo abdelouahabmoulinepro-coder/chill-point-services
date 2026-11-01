@@ -1,9 +1,7 @@
-import sqlite3
-
 import pandas as pd
 import streamlit as st
 
-from core.database import add_item, get_settings, list_items
+from core.database import DuplicateValueError, add_item, get_settings, list_items
 
 
 settings = get_settings()
@@ -32,7 +30,7 @@ with left:
                 add_item({"name": name, "kind": kind, "sku": sku.strip(), "description": description, "unit": unit, "unit_price": unit_price, "vat_rate": vat_rate, "track_stock": track_stock and kind == "Bien", "stock_quantity": stock_quantity})
                 st.toast("Article enregistré", icon=":material/check_circle:")
                 st.rerun()
-            except sqlite3.IntegrityError:
+            except DuplicateValueError:
                 st.error("Cette référence est déjà utilisée.")
 
 with right:
@@ -43,6 +41,9 @@ with right:
         st.info("Aucun article trouvé.", icon=":material/inventory_2:")
     else:
         frame = pd.DataFrame(items)[["sku", "name", "kind", "unit", "unit_price", "vat_rate", "stock_quantity", "track_stock"]]
+        frame[["unit_price", "vat_rate", "stock_quantity"]] = frame[
+            ["unit_price", "vat_rate", "stock_quantity"]
+        ].astype(float)
         frame.columns = ["Référence", "Désignation", "Nature", "Unité", "Prix HT", "TVA", "Stock", "Suivi du stock"]
         st.dataframe(
             frame,

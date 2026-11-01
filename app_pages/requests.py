@@ -67,7 +67,10 @@ if requests:
             with contact_right:
                 st.markdown(f"**Téléphone :** {selected['phone'] or '—'}")
                 st.markdown(f"**Contact préféré :** {selected['preferred_contact'] or '—'}")
-                received_at = datetime.fromisoformat(selected["created_at"]).strftime("%d/%m/%Y à %H:%M")
+                created_at = selected["created_at"]
+                if isinstance(created_at, str):
+                    created_at = datetime.fromisoformat(created_at)
+                received_at = created_at.strftime("%d/%m/%Y à %H:%M")
                 st.markdown(f"**Reçue le :** {received_at}")
             st.markdown("**Message du client**")
             st.write(selected["message"])

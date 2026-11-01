@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import sqlite3
+import os
+import logging
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
+
+import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg_pool import ConnectionPool, PoolTimeout
+except ImportError:  # SQLite remains usable without the optional PostgreSQL driver.
+    psycopg = None
+    dict_row = None
+    ConnectionPool = None
+    PoolTimeout = Exception
 
 from core.formatting import DOCUMENT_PATTERNS, STATUS_OPTIONS
 
@@ -13,21 +29,163 @@ from core.formatting import DOCUMENT_PATTERNS, STATUS_OPTIONS
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 DB_PATH = DATA_DIR / "gestion.db"
+POSTGRES_SCHEMA_VERSION = 1
+LOGGER = logging.getLogger(__name__)
+_ACTIVE_POOLS: set[Any] = set()
+
+
+class DatabaseError(RuntimeError):
+    """Base class for sanitized persistence errors exposed to the application."""
+
+
+class DatabaseConfigurationError(DatabaseError):
+    pass
+
+
+class DatabaseUnavailableError(DatabaseError):
+    pass
+
+
+class DatabaseSchemaError(DatabaseError):
+    pass
+
+
+class DatabaseIntegrityError(DatabaseError):
+    pass
+
+
+class DuplicateValueError(DatabaseIntegrityError):
+    pass
+
+
+def _secret_database_section() -> Mapping[str, Any]:
+    try:
+        section = st.secrets.get("database", {})
+    except (StreamlitSecretNotFoundError, FileNotFoundError):
+        return {}
+    return section if isinstance(section, Mapping) else {}
+
+
+def get_backend_name() -> str:
+    section = _secret_database_section()
+    backend = os.environ.get("DB_BACKEND", str(section.get("backend", "sqlite"))).strip().lower()
+    if backend not in {"sqlite", "postgres"}:
+        raise DatabaseConfigurationError("DB_BACKEND doit valoir 'sqlite' ou 'postgres'.")
+    return backend
+
+
+def _postgres_url() -> str:
+    section = _secret_database_section()
+    url = os.environ.get("DATABASE_URL", str(section.get("url", ""))).strip()
+    if url:
+        if "://" not in url:
+            raise DatabaseConfigurationError("L'URI PostgreSQL est invalide.")
+        authority = url.split("://", 1)[1].split("/", 1)[0]
+        if authority.count("@") != 1:
+            raise DatabaseConfigurationError(
+                "L'URI PostgreSQL contient un caractère réservé non encodé dans les identifiants."
+            )
+    return url
+
+
+@lru_cache(maxsize=2)
+def _postgres_pool(url: str):
+    if psycopg is None or ConnectionPool is None:
+        raise DatabaseConfigurationError(
+            "Le pilote PostgreSQL n'est pas installé. Installez les dépendances du projet."
+        )
+    sslmode = "verify-full" if "sslmode=verify-full" in url.lower() else "require"
+    pool = ConnectionPool(
+        conninfo=url,
+        min_size=0,
+        max_size=3,
+        open=True,
+        timeout=8,
+        max_lifetime=300,
+        kwargs={
+            "autocommit": False,
+            "connect_timeout": 8,
+            "row_factory": dict_row,
+            "application_name": "chill-point-services",
+            "sslmode": sslmode,
+        },
+    )
+    _ACTIVE_POOLS.add(pool)
+    return pool
+
+
+def reset_database_runtime() -> None:
+    """Close cached PostgreSQL pools; primarily useful for isolated tests."""
+    for pool in list(_ACTIVE_POOLS):
+        pool.close()
+    _ACTIVE_POOLS.clear()
+    _postgres_pool.cache_clear()
+
+
+def _postgres_query(query: str) -> str:
+    # All SQL in this module uses question marks exclusively as DB-API placeholders.
+    return query.replace("?", "%s")
+
+
+def _sqlite_value(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, bool):
+        return int(value)
+    return value
+
+
+class _ConnectionAdapter:
+    def __init__(self, raw: Any, backend: str) -> None:
+        self.raw = raw
+        self.backend = backend
+
+    def execute(self, query: str, params: Iterable[Any] = ()):
+        sql = _postgres_query(query) if self.backend == "postgres" else query
+        values = tuple(params)
+        if self.backend == "sqlite":
+            values = tuple(_sqlite_value(value) for value in values)
+        try:
+            return self.raw.execute(sql, values)
+        except sqlite3.IntegrityError as error:
+            if "UNIQUE constraint failed" in str(error):
+                raise DuplicateValueError("Une valeur unique existe déjà.") from error
+            raise DatabaseIntegrityError("La contrainte de données SQLite a été refusée.") from error
+        except Exception as error:
+            if psycopg is not None and isinstance(error, psycopg.errors.UniqueViolation):
+                raise DuplicateValueError("Une valeur unique existe déjà.") from error
+            if psycopg is not None and isinstance(error, psycopg.IntegrityError):
+                raise DatabaseIntegrityError("La contrainte de données PostgreSQL a été refusée.") from error
+            raise
+
+    def executemany(self, query: str, params: Iterable[Iterable[Any]]):
+        sql = _postgres_query(query) if self.backend == "postgres" else query
+        values = [tuple(row) for row in params]
+        if self.backend == "sqlite":
+            values = [tuple(_sqlite_value(value) for value in row) for row in values]
+            return self.raw.executemany(sql, values)
+        with self.raw.cursor() as cursor:
+            cursor.executemany(sql, values)
+
+    def executescript(self, script: str):
+        if self.backend != "sqlite":
+            raise DatabaseSchemaError("Les scripts SQLite ne peuvent pas être exécutés sur PostgreSQL.")
+        return self.raw.executescript(script)
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _decimal(value: Any) -> Decimal:
     return Decimal(str(value or 0))
 
 
-def _round(value: Decimal) -> float:
-    return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+def _round(value: Decimal) -> Decimal:
+    return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _ensure_column(conn: sqlite3.Connection, table: str, name: str, definition: str) -> None:
+def _ensure_column(conn: _ConnectionAdapter, table: str, name: str, definition: str) -> None:
     existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
     if name not in existing:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
@@ -35,22 +193,63 @@ def _ensure_column(conn: sqlite3.Connection, table: str, name: str, definition: 
 
 @contextmanager
 def connection():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=15)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    backend = get_backend_name()
+    if backend == "sqlite":
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        raw = sqlite3.connect(DB_PATH, timeout=15)
+        raw.row_factory = sqlite3.Row
+        raw.execute("PRAGMA foreign_keys = ON")
+        raw.execute("PRAGMA journal_mode = WAL")
+        adapter = _ConnectionAdapter(raw, backend)
+        try:
+            yield adapter
+            raw.commit()
+        except Exception:
+            raw.rollback()
+            raise
+        finally:
+            raw.close()
+        return
+
+    url = _postgres_url()
+    if not url:
+        raise DatabaseConfigurationError(
+            "La connexion PostgreSQL est sélectionnée, mais aucune URI n'est configurée."
+        )
     try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
+        pool = _postgres_pool(url)
+        with pool.connection() as raw:
+            with raw.transaction():
+                yield _ConnectionAdapter(raw, backend)
+    except DatabaseError:
         raise
-    finally:
-        conn.close()
+    except (PoolTimeout, psycopg.OperationalError) as error:
+        LOGGER.error("PostgreSQL indisponible (%s).", type(error).__name__)
+        raise DatabaseUnavailableError(
+            "La base PostgreSQL est momentanément indisponible. Aucun enregistrement n'a été effectué."
+        ) from error
 
 
 def init_db() -> None:
+    if get_backend_name() == "postgres":
+        with connection() as conn:
+            marker = conn.execute(
+                "SELECT to_regclass('public.schema_migrations') AS relation_name"
+            ).fetchone()
+            if not marker or marker["relation_name"] is None:
+                raise DatabaseSchemaError(
+                    "Le schéma PostgreSQL n'est pas initialisé. Exécutez scripts/migrate_postgres.py."
+                )
+            version = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations"
+            ).fetchone()["version"]
+            if int(version) != POSTGRES_SCHEMA_VERSION:
+                raise DatabaseSchemaError(
+                    f"Version du schéma PostgreSQL incompatible: {version}; "
+                    f"version attendue: {POSTGRES_SCHEMA_VERSION}."
+                )
+        return
+
     with connection() as conn:
         conn.executescript(
             """
@@ -207,6 +406,14 @@ def _rows(query: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
         return [dict(row) for row in conn.execute(query, tuple(params)).fetchall()]
 
 
+def _insert_id(conn: _ConnectionAdapter, query: str, params: Iterable[Any]) -> int:
+    if conn.backend == "postgres":
+        row = conn.execute(f"{query.rstrip()} RETURNING id", tuple(params)).fetchone()
+        return int(row["id"])
+    cursor = conn.execute(query, tuple(params))
+    return int(cursor.lastrowid)
+
+
 def get_settings() -> dict[str, Any]:
     with connection() as conn:
         row = conn.execute("SELECT * FROM company_settings WHERE id = 1").fetchone()
@@ -236,6 +443,8 @@ def update_settings(values: dict[str, Any]) -> None:
         "document_footer",
     }
     clean = {key: values[key] for key in allowed if key in values}
+    if not clean:
+        return
     assignments = ", ".join(f"{key} = ?" for key in clean)
     with connection() as conn:
         conn.execute(
@@ -283,8 +492,14 @@ def add_client_request(values: dict[str, Any]) -> int:
         raise ValueError("La description de la demande est trop longue.")
 
     now = _now()
-    recent_limit = (datetime.now() - timedelta(minutes=5)).isoformat(timespec="seconds")
+    recent_limit = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat(timespec="seconds")
     with connection() as conn:
+        if conn.backend == "postgres":
+            contact_key = f"{email}|{phone}"
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(?))",
+                (contact_key,),
+            )
         recent = conn.execute(
             """
             SELECT id FROM client_requests
@@ -299,7 +514,8 @@ def add_client_request(values: dict[str, Any]) -> int:
                 "Une demande avec ces coordonnées vient déjà d’être envoyée. "
                 "Veuillez patienter quelques minutes."
             )
-        cursor = conn.execute(
+        request_id = _insert_id(
+            conn,
             """
             INSERT INTO client_requests
                 (full_name, company_name, email, phone, request_type, subject,
@@ -319,7 +535,7 @@ def add_client_request(values: dict[str, Any]) -> int:
                 now,
             ),
         )
-        return int(cursor.lastrowid)
+        return request_id
 
 
 def list_client_requests(status: str | None = None) -> list[dict[str, Any]]:
@@ -352,7 +568,8 @@ def update_client_request_status(request_id: int, status: str) -> None:
 
 def add_customer(values: dict[str, Any]) -> int:
     with connection() as conn:
-        cursor = conn.execute(
+        customer_id = _insert_id(
+            conn,
             """
             INSERT INTO customers
                 (code, name, kind, contact_name, email, phone, address, tax_id, created_at)
@@ -370,7 +587,6 @@ def add_customer(values: dict[str, Any]) -> int:
                 _now(),
             ),
         )
-        customer_id = int(cursor.lastrowid)
         if not values.get("code"):
             conn.execute(
                 "UPDATE customers SET code = ? WHERE id = ?",
@@ -380,23 +596,27 @@ def add_customer(values: dict[str, Any]) -> int:
 
 
 def list_customers(search: str = "", active_only: bool = True) -> list[dict[str, Any]]:
+    postgres = get_backend_name() == "postgres"
     clauses = []
     params: list[Any] = []
     if active_only:
-        clauses.append("active = 1")
+        clauses.append("active = TRUE" if postgres else "active = 1")
     if search.strip():
-        clauses.append("(name LIKE ? OR code LIKE ? OR email LIKE ? OR phone LIKE ?)")
+        operator = "ILIKE" if postgres else "LIKE"
+        clauses.append(
+            f"(name {operator} ? OR code {operator} ? OR email {operator} ? OR phone {operator} ?)"
+        )
         term = f"%{search.strip()}%"
         params.extend([term, term, term, term])
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    return _rows(
-        f"SELECT * FROM customers {where} ORDER BY name COLLATE NOCASE", params
-    )
+    order = "lower(name), name" if postgres else "name COLLATE NOCASE"
+    return _rows(f"SELECT * FROM customers {where} ORDER BY {order}", params)
 
 
 def add_item(values: dict[str, Any]) -> int:
     with connection() as conn:
-        cursor = conn.execute(
+        item_id = _insert_id(
+            conn,
             """
             INSERT INTO items
                 (sku, name, kind, description, unit, unit_price, vat_rate,
@@ -409,14 +629,13 @@ def add_item(values: dict[str, Any]) -> int:
                 values.get("kind", "Service"),
                 values.get("description", "").strip(),
                 values.get("unit", "unité"),
-                float(values.get("unit_price", 0)),
-                float(values.get("vat_rate", 0)),
-                float(values.get("stock_quantity", 0)),
-                int(bool(values.get("track_stock", False))),
+                _decimal(values.get("unit_price", 0)),
+                _decimal(values.get("vat_rate", 0)),
+                _decimal(values.get("stock_quantity", 0)),
+                bool(values.get("track_stock", False)),
                 _now(),
             ),
         )
-        item_id = int(cursor.lastrowid)
         if not values.get("sku"):
             prefix = "SRV" if values.get("kind") == "Service" else "ART"
             conn.execute(
@@ -426,21 +645,37 @@ def add_item(values: dict[str, Any]) -> int:
 
 
 def list_items(search: str = "", active_only: bool = True) -> list[dict[str, Any]]:
+    postgres = get_backend_name() == "postgres"
     clauses = []
     params: list[Any] = []
     if active_only:
-        clauses.append("active = 1")
+        clauses.append("active = TRUE" if postgres else "active = 1")
     if search.strip():
-        clauses.append("(name LIKE ? OR sku LIKE ? OR description LIKE ?)")
+        operator = "ILIKE" if postgres else "LIKE"
+        clauses.append(f"(name {operator} ? OR sku {operator} ? OR description {operator} ?)")
         term = f"%{search.strip()}%"
         params.extend([term, term, term])
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    return _rows(f"SELECT * FROM items {where} ORDER BY name COLLATE NOCASE", params)
+    order = "lower(name), name" if postgres else "name COLLATE NOCASE"
+    return _rows(f"SELECT * FROM items {where} ORDER BY {order}", params)
 
 
-def _next_number(conn: sqlite3.Connection, doc_type: str, year: int) -> str:
+def _next_number(conn: _ConnectionAdapter, doc_type: str, year: int) -> str:
     pattern = DOCUMENT_PATTERNS[doc_type]
     sequence_year = year if "{year}" in pattern else 0
+    if conn.backend == "postgres":
+        row = conn.execute(
+            """
+            INSERT INTO sequences (doc_type, year, last_value)
+            VALUES (?, ?, 1)
+            ON CONFLICT (doc_type, year) DO UPDATE
+            SET last_value = sequences.last_value + 1
+            RETURNING last_value
+            """,
+            (doc_type, sequence_year),
+        ).fetchone()
+        return pattern.format(year=year, seq=int(row["last_value"]))
+
     conn.execute(
         "INSERT OR IGNORE INTO sequences (doc_type, year, last_value) VALUES (?, ?, 0)",
         (doc_type, sequence_year),
@@ -456,7 +691,9 @@ def _next_number(conn: sqlite3.Connection, doc_type: str, year: int) -> str:
     return pattern.format(year=year, seq=sequence)
 
 
-def calculate_lines(lines: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], float, float, float]:
+def calculate_lines(
+    lines: Iterable[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], Decimal, Decimal, Decimal]:
     calculated: list[dict[str, Any]] = []
     subtotal = Decimal("0")
     tax_total = Decimal("0")
@@ -468,26 +705,34 @@ def calculate_lines(lines: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any
         vat = _decimal(line.get("vat_rate"))
         if not description or quantity <= 0:
             continue
+        if unit_price < 0:
+            raise ValueError("Le prix unitaire ne peut pas être négatif.")
+        if discount < 0 or discount > 100:
+            raise ValueError("La remise doit être comprise entre 0 et 100 %.")
+        if vat < 0 or vat > 100:
+            raise ValueError("Le taux de TVA doit être compris entre 0 et 100 %.")
         base = quantity * unit_price * (Decimal("1") - discount / Decimal("100"))
         tax = base * vat / Decimal("100")
-        total = base + tax
+        line_subtotal = _round(base)
+        line_tax = _round(tax)
+        line_total = line_subtotal + line_tax
         calculated.append(
             {
                 "item_id": line.get("item_id") or None,
                 "description": description,
-                "quantity": float(quantity),
+                "quantity": quantity,
                 "unit": str(line.get("unit") or "unité"),
-                "unit_price": float(unit_price),
-                "discount_rate": float(discount),
-                "vat_rate": float(vat),
-                "line_subtotal": _round(base),
-                "line_tax": _round(tax),
-                "line_total": _round(total),
+                "unit_price": unit_price,
+                "discount_rate": discount,
+                "vat_rate": vat,
+                "line_subtotal": line_subtotal,
+                "line_tax": line_tax,
+                "line_total": line_total,
             }
         )
-        subtotal += base
-        tax_total += tax
-    return calculated, _round(subtotal), _round(tax_total), _round(subtotal + tax_total)
+        subtotal += line_subtotal
+        tax_total += line_tax
+    return calculated, subtotal, tax_total, subtotal + tax_total
 
 
 def create_document(
@@ -515,7 +760,8 @@ def create_document(
 
     with connection() as conn:
         number = _next_number(conn, doc_type, int(issue_iso[:4]))
-        cursor = conn.execute(
+        document_id = _insert_id(
+            conn,
             """
             INSERT INTO documents
                 (doc_type, number, customer_id, issue_date, due_date, status, notes,
@@ -539,7 +785,6 @@ def create_document(
                 _now(),
             ),
         )
-        document_id = int(cursor.lastrowid)
         conn.executemany(
             """
             INSERT INTO document_lines
@@ -570,10 +815,12 @@ def create_document(
 def list_documents(
     search: str = "", doc_type: str | None = None, status: str | None = None
 ) -> list[dict[str, Any]]:
+    postgres = get_backend_name() == "postgres"
     clauses: list[str] = []
     params: list[Any] = []
     if search.strip():
-        clauses.append("(d.number LIKE ? OR c.name LIKE ?)")
+        operator = "ILIKE" if postgres else "LIKE"
+        clauses.append(f"(d.number {operator} ? OR c.name {operator} ?)")
         term = f"%{search.strip()}%"
         params.extend([term, term])
     if doc_type:
@@ -631,10 +878,17 @@ def get_document(document_id: int) -> dict[str, Any]:
 
 
 def update_document_status(document_id: int, status: str) -> None:
-    document = get_document(document_id)
-    if status not in STATUS_OPTIONS[document["doc_type"]]:
-        raise ValueError("Statut invalide.")
     with connection() as conn:
+        lock = " FOR UPDATE" if conn.backend == "postgres" else ""
+        document = conn.execute(
+            f"SELECT doc_type FROM documents WHERE id = ?{lock}",
+            (document_id,),
+        ).fetchone()
+        if document is None:
+            raise ValueError("Document introuvable.")
+        doc_type = document["doc_type"] if conn.backend == "postgres" else document[0]
+        if status not in STATUS_OPTIONS[doc_type]:
+            raise ValueError("Statut invalide.")
         conn.execute("UPDATE documents SET status = ? WHERE id = ?", (status, document_id))
 
 
@@ -648,18 +902,24 @@ def convert_document(source_id: int, target_type: str) -> tuple[int, str]:
     today = date.today()
     due = today + timedelta(days=30) if target_type == "FACTURE" else None
     status = "Brouillon"
-    return create_document(
-        doc_type=target_type,
-        customer_id=int(source["customer_id"]),
-        issue_date=today,
-        due_date=due,
-        status=status,
-        currency=source["currency"],
-        lines=source["lines"],
-        notes=source["notes"],
-        terms=source["terms"],
-        source_document_id=source_id,
-    )
+    try:
+        return create_document(
+            doc_type=target_type,
+            customer_id=int(source["customer_id"]),
+            issue_date=today,
+            due_date=due,
+            status=status,
+            currency=source["currency"],
+            lines=source["lines"],
+            notes=source["notes"],
+            terms=source["terms"],
+            source_document_id=source_id,
+        )
+    except DuplicateValueError:
+        existing = find_conversion(source_id, target_type)
+        if existing:
+            return int(existing["id"]), str(existing["number"])
+        raise
 
 
 def find_conversion(source_id: int, target_type: str) -> dict[str, Any] | None:
@@ -678,32 +938,46 @@ def record_payment(
     reference: str = "",
     notes: str = "",
 ) -> int:
-    document = get_document(document_id)
-    if document["doc_type"] != "FACTURE":
-        raise ValueError("Un paiement doit être rattaché à une facture.")
-    remaining = _decimal(document["total"]) - _decimal(document["paid_amount"])
-    amount_decimal = _decimal(amount)
+    amount_decimal = _round(_decimal(amount))
     if amount_decimal <= 0:
         raise ValueError("Le montant doit être supérieur à zéro.")
-    if amount_decimal > remaining + Decimal("0.01"):
-        raise ValueError("Le paiement dépasse le solde de la facture.")
     payment_iso = payment_date.isoformat() if isinstance(payment_date, date) else str(payment_date)
     with connection() as conn:
-        cursor = conn.execute(
+        lock = " FOR UPDATE" if conn.backend == "postgres" else ""
+        row = conn.execute(
+            f"SELECT doc_type, total FROM documents WHERE id = ?{lock}",
+            (document_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Document introuvable.")
+        document = dict(row)
+        if document["doc_type"] != "FACTURE":
+            raise ValueError("Un paiement doit être rattaché à une facture.")
+        paid_row = conn.execute(
+            "SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE document_id = ?",
+            (document_id,),
+        ).fetchone()
+        paid_before = _decimal(dict(paid_row)["paid"])
+        remaining = _round(_decimal(document["total"]) - paid_before)
+        if amount_decimal > remaining:
+            raise ValueError("Le paiement dépasse le solde de la facture.")
+
+        payment_id = _insert_id(
+            conn,
             """
             INSERT INTO payments
                 (document_id, payment_date, amount, method, reference, notes, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (document_id, payment_iso, float(amount_decimal), method, reference.strip(), notes.strip(), _now()),
+            (document_id, payment_iso, amount_decimal, method, reference.strip(), notes.strip(), _now()),
         )
-        paid = _decimal(document["paid_amount"]) + amount_decimal
-        status = "Payée" if paid >= _decimal(document["total"]) - Decimal("0.01") else "Partiellement payée"
+        paid = paid_before + amount_decimal
+        status = "Payée" if paid == _round(_decimal(document["total"])) else "Partiellement payée"
         conn.execute(
             "UPDATE documents SET paid_amount = ?, status = ? WHERE id = ?",
             (_round(paid), status, document_id),
         )
-        return int(cursor.lastrowid)
+        return payment_id
 
 
 def list_payments() -> list[dict[str, Any]]:
@@ -751,16 +1025,21 @@ def dashboard_data(start_date: date | None = None, end_date: date | None = None)
             f"SELECT COALESCE(SUM(total), 0) AS pipeline, COUNT(*) AS quote_count FROM documents WHERE {' AND '.join(quote_clauses)}",
             tuple(quote_params),
         ).fetchone()
+        month_expression = (
+            "to_char(d.issue_date, 'YYYY-MM')"
+            if conn.backend == "postgres"
+            else "substr(d.issue_date, 1, 7)"
+        )
         monthly = [
             dict(row)
             for row in conn.execute(
                 f"""
-                SELECT substr(d.issue_date, 1, 7) AS month,
+                SELECT {month_expression} AS month,
                        ROUND(SUM(d.total), 2) AS invoiced,
                        ROUND(SUM(d.paid_amount), 2) AS collected
                 FROM documents d
                 WHERE {where}
-                GROUP BY substr(d.issue_date, 1, 7)
+                GROUP BY {month_expression}
                 ORDER BY month
                 """,
                 tuple(params),
@@ -770,6 +1049,10 @@ def dashboard_data(start_date: date | None = None, end_date: date | None = None)
 
 
 def database_backup_bytes() -> bytes:
+    if get_backend_name() == "postgres":
+        raise ValueError(
+            "Les sauvegardes PostgreSQL sont réalisées hors de l'application avec pg_dump."
+        )
     if not DB_PATH.exists():
         init_db()
     backup_path = DATA_DIR / "gestion.backup.db"
@@ -860,16 +1143,17 @@ def apply_reference_data() -> dict[str, int]:
         }
     )
     with connection() as conn:
+        floor_function = "GREATEST" if conn.backend == "postgres" else "MAX"
         for doc_type, sequence_year, floor in [
             ("DEVIS", 0, 6),
             ("FACTURE", 2026, 5),
             ("BL", 2026, 3),
         ]:
             conn.execute(
-                """
+                f"""
                 INSERT INTO sequences (doc_type, year, last_value) VALUES (?, ?, ?)
                 ON CONFLICT(doc_type, year) DO UPDATE SET
-                    last_value = MAX(last_value, excluded.last_value)
+                    last_value = {floor_function}(sequences.last_value, excluded.last_value)
                 """,
                 (doc_type, sequence_year, floor),
             )

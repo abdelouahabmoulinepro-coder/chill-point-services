@@ -84,7 +84,7 @@ if mode == "Créer un document":
                 description = item["name"]
                 if item.get("description"):
                     description += "\n" + item["description"]
-                new_row = pd.DataFrame([{"item_id": item["id"], "description": description, "quantity": 1.0, "unit": item["unit"], "unit_price": item["unit_price"], "discount_rate": 0.0, "vat_rate": item["vat_rate"]}])
+                new_row = pd.DataFrame([{"item_id": item["id"], "description": description, "quantity": 1.0, "unit": item["unit"], "unit_price": float(item["unit_price"]), "discount_rate": 0.0, "vat_rate": float(item["vat_rate"])}])
                 current = edited_lines[edited_lines["description"].astype(str).str.strip() != ""]
                 st.session_state.draft_lines = pd.concat([current, new_row], ignore_index=True)
                 st.session_state.pop("document_lines_editor", None)
@@ -129,6 +129,7 @@ else:
         st.stop()
 
     frame = pd.DataFrame(documents)[["number", "doc_type", "customer_name", "issue_date", "status", "total", "paid_amount", "balance"]]
+    frame[["total", "paid_amount", "balance"]] = frame[["total", "paid_amount", "balance"]].astype(float)
     frame["doc_type"] = frame["doc_type"].map(DOCUMENT_LABELS)
     frame["issue_date"] = frame["issue_date"].map(french_date)
     frame.columns = ["Numéro", "Type", "Client", "Date", "Statut", "Total", "Payé", "Solde"]
@@ -150,6 +151,9 @@ else:
             st.badge(document["status"], icon=":material/info:", color="blue")
         st.caption(f"Client : {document['customer_name']} · Émis le {french_date(document['issue_date'])} · Devise : {document['currency']}")
         line_frame = pd.DataFrame(document["lines"])[["description", "quantity", "unit", "unit_price", "discount_rate", "vat_rate", "line_total"]]
+        line_frame[["quantity", "unit_price", "discount_rate", "vat_rate", "line_total"]] = line_frame[
+            ["quantity", "unit_price", "discount_rate", "vat_rate", "line_total"]
+        ].astype(float)
         line_frame.columns = ["Description", "Quantité", "Unité", "Prix HT", "Remise %", "TVA %", "Total TTC"]
         st.dataframe(line_frame, hide_index=True)
         if document["doc_type"] != "BL" or settings.get("show_prices_on_delivery_note"):

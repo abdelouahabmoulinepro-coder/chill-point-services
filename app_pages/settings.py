@@ -2,7 +2,7 @@ from datetime import datetime
 
 import streamlit as st
 
-from core.database import database_backup_bytes, get_settings, seed_demo_data, update_settings
+from core.database import database_backup_bytes, get_backend_name, get_settings, seed_demo_data, update_settings
 
 
 settings = get_settings()
@@ -44,15 +44,22 @@ with general:
 with backup:
     with st.container(border=True):
         st.subheader("Sauvegarder les données")
-        st.write("Téléchargez une copie complète de la base. Conservez-la dans un emplacement sûr et sauvegardé.")
-        backup_data = database_backup_bytes()
-        st.download_button(
-            "Télécharger la sauvegarde",
-            data=backup_data,
-            file_name=f"gestion-commerciale-{datetime.now():%Y%m%d-%H%M}.db",
-            mime="application/vnd.sqlite3",
-            icon=":material/download:",
-        )
+        if get_backend_name() == "sqlite":
+            st.write("Téléchargez une copie complète de la base. Conservez-la dans un emplacement sûr et sauvegardé.")
+            backup_data = database_backup_bytes()
+            st.download_button(
+                "Télécharger la sauvegarde",
+                data=backup_data,
+                file_name=f"gestion-commerciale-{datetime.now():%Y%m%d-%H%M}.db",
+                mime="application/vnd.sqlite3",
+                icon=":material/download:",
+            )
+        else:
+            st.info(
+                "Les sauvegardes PostgreSQL sont réalisées de manière externe avec pg_dump "
+                "et font l'objet de tests de restauration.",
+                icon=":material/cloud_done:",
+            )
 
     with st.container(border=True):
         st.subheader("Données de démonstration")

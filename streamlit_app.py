@@ -1,7 +1,7 @@
 import streamlit as st
 
 from core.auth import logout_director, require_director_auth
-from core.database import get_settings, init_db
+from core.database import DatabaseError, get_settings, init_db
 
 
 DEFAULT_LOGO_PATH = "assets/logo-moderne-final.png"
@@ -64,7 +64,15 @@ st.html(
     """
 )
 
-init_db()
+try:
+    init_db()
+except DatabaseError:
+    st.error(
+        "Le service de données est indisponible ou nécessite une migration. "
+        "Aucune base locale de remplacement n'a été utilisée.",
+        icon=":material/database_off:",
+    )
+    st.stop()
 
 home_page = st.Page(
     "app_pages/home.py",

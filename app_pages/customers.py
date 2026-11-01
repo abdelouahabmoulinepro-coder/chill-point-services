@@ -1,9 +1,7 @@
-import sqlite3
-
 import pandas as pd
 import streamlit as st
 
-from core.database import add_customer, list_customers
+from core.database import DuplicateValueError, add_customer, list_customers
 
 
 st.caption("Centralisez les coordonnées de vos clients professionnels et particuliers.")
@@ -31,7 +29,7 @@ with left:
                 add_customer({"name": name, "kind": kind, "contact_name": contact_name, "email": email, "phone": phone, "address": address, "tax_id": tax_id, "code": code.strip()})
                 st.toast("Client enregistré", icon=":material/check_circle:")
                 st.rerun()
-            except sqlite3.IntegrityError:
+            except DuplicateValueError:
                 st.error("Ce code client est déjà utilisé.")
 
 with right:
