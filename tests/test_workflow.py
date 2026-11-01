@@ -200,6 +200,20 @@ class BackendSelectionTest(unittest.TestCase):
             with self.assertRaises(database.DatabaseConfigurationError):
                 database.init_db()
 
+    def test_postgres_uri_rejects_wrong_project_ref(self):
+        url = "postgresql://role.expectedref:password@pooler.supabase.com:5432/postgres"
+        with patch.dict(
+            "os.environ",
+            {
+                "DB_BACKEND": "postgres",
+                "DATABASE_URL": url,
+                "DB_PROJECT_REF": "differentref",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(database.DatabaseConfigurationError):
+                database.init_db()
+
     def test_postgres_configuration_never_falls_back_to_sqlite(self):
         with tempfile.TemporaryDirectory() as directory:
             old_data_dir, old_db_path = database.DATA_DIR, database.DB_PATH

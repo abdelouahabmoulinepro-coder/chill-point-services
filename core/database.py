@@ -9,6 +9,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import unquote, urlsplit
 
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
@@ -77,6 +78,9 @@ def get_backend_name() -> str:
 def _postgres_url() -> str:
     section = _secret_database_section()
     url = os.environ.get("DATABASE_URL", str(section.get("url", ""))).strip()
+    expected_project_ref = os.environ.get(
+        "DB_PROJECT_REF", str(section.get("project_ref", ""))
+    ).strip()
     if url:
         if "://" not in url:
             raise DatabaseConfigurationError("L'URI PostgreSQL est invalide.")
@@ -85,6 +89,17 @@ def _postgres_url() -> str:
             raise DatabaseConfigurationError(
                 "L'URI PostgreSQL contient un caractère réservé non encodé dans les identifiants."
             )
+        if expected_project_ref:
+            parsed = urlsplit(url)
+            username = unquote(parsed.username or "")
+            host = parsed.hostname or ""
+            if not (
+                username.endswith(f".{expected_project_ref}")
+                or f".{expected_project_ref}." in host
+            ):
+                raise DatabaseConfigurationError(
+                    "L'URI PostgreSQL ne correspond pas au Project ref configuré."
+                )
     return url
 
 

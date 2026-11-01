@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from core.database import DatabaseConfigurationError, _postgres_url, get_backend_name
+from scripts.config_loader import load_database_config
 
 
 MIGRATIONS_DIR = ROOT_DIR / "migrations" / "postgres"
@@ -32,15 +34,21 @@ def migration_files() -> list[tuple[int, Path]]:
 
 
 def main() -> None:
-    if get_backend_name() != "postgres":
-        raise DatabaseConfigurationError(
-            "Définissez [database].backend = 'postgres' dans .streamlit/secrets.toml."
-        )
-    url = _postgres_url()
-    if not url:
-        raise DatabaseConfigurationError(
-            "Renseignez [database].url dans .streamlit/secrets.toml."
-        )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--secrets-file", type=Path)
+    args = parser.parse_args()
+    if args.secrets_file:
+        url = load_database_config(args.secrets_file).url
+    else:
+        if get_backend_name() != "postgres":
+            raise DatabaseConfigurationError(
+                "Définissez [database].backend = 'postgres' dans .streamlit/secrets.toml."
+            )
+        url = _postgres_url()
+        if not url:
+            raise DatabaseConfigurationError(
+                "Renseignez [database].url dans .streamlit/secrets.toml."
+            )
     sslmode = "verify-full" if "sslmode=verify-full" in url.lower() else "require"
     with psycopg.connect(
         url,

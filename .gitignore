@@ -2,8 +2,10 @@
 __pycache__/
 *.py[cod]
 .streamlit/secrets.toml
+.streamlit/secrets.*.toml
 data/*.db
 data/*.db-shm
 data/*.db-wal
 output/
 tmp/
+backups/
