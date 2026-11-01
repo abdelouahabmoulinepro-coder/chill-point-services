@@ -53,7 +53,7 @@ secrets et dans `.streamlit/backup.prod.passphrase` (fichier ignoré), puis lanc
   --passphrase-file .streamlit\backup.prod.passphrase
 ```
 
-Le script exécute `pg_dump`, restaure le dump dans PostgreSQL 15 isolé sous Docker,
+Le script exécute `pg_dump`, restaure le dump dans PostgreSQL 17 isolé sous Docker,
 vérifie la version du schéma, chiffre le dump en AES-256-GCM et écrit une empreinte
 SHA-256. Le dump non chiffré est supprimé après chiffrement.
 

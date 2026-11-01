@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT_DIR))
 from scripts.config_loader import load_database_config
 
 
-POSTGRES_IMAGE = "postgres:15-alpine"
+POSTGRES_IMAGE = "postgres:17-alpine"
 MAGIC = b"CPSBACKUP1"
 
 
@@ -35,7 +35,10 @@ def run(command: list[str], *, environment: dict[str, str] | None = None) -> sub
         check=False,
     )
     if result.returncode:
-        raise RuntimeError(f"Commande de sauvegarde en échec: {command[1] if len(command) > 1 else command[0]}")
+        detail = (result.stderr or result.stdout or "erreur sans détail").strip()[-1200:]
+        raise RuntimeError(
+            f"Commande de sauvegarde en échec ({command[1] if len(command) > 1 else command[0]}): {detail}"
+        )
     return result
 
 
@@ -66,6 +69,7 @@ def create_dump(url: str, output: Path) -> None:
             "--username", parts["user"],
             "--dbname", parts["database"],
             "--format=custom",
+            "--schema=public",
             "--no-owner",
             "--no-acl",
             "--file", f"/backup/{output.name}",
@@ -103,6 +107,11 @@ def verify_restore(dump_path: Path) -> None:
             time.sleep(1)
         if not ready:
             raise RuntimeError("La base de restauration isolée n'est pas devenue disponible.")
+        run([
+            "docker", "exec", "-e", f"PGPASSWORD={password}", container,
+            "psql", "-U", "postgres", "-d", "restore_test", "-v", "ON_ERROR_STOP=1",
+            "-c", "DROP SCHEMA public CASCADE;",
+        ])
         run([
             "docker", "exec", "-e", f"PGPASSWORD={password}", container,
             "pg_restore", "-U", "postgres", "-d", "restore_test",

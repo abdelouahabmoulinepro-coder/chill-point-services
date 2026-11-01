@@ -61,19 +61,18 @@ def main() -> None:
                 "SELECT 1 FROM pg_roles WHERE rolname = %s", (args.role,)
             ).fetchone()
             role_identifier = sql.Identifier(args.role)
+            password_literal = sql.Literal(password)
             if exists:
                 conn.execute(
                     sql.SQL(
-                        "ALTER ROLE {} WITH LOGIN PASSWORD %s NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION"
-                    ).format(role_identifier),
-                    (password,),
+                        "ALTER ROLE {} WITH LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION"
+                    ).format(role_identifier, password_literal),
                 )
             else:
                 conn.execute(
                     sql.SQL(
-                        "CREATE ROLE {} WITH LOGIN PASSWORD %s NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION"
-                    ).format(role_identifier),
-                    (password,),
+                        "CREATE ROLE {} WITH LOGIN PASSWORD {} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION"
+                    ).format(role_identifier, password_literal),
                 )
             conn.execute(sql.SQL("GRANT CONNECT ON DATABASE {} TO {}").format(
                 sql.Identifier(database_name), role_identifier
