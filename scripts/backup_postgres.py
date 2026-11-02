@@ -18,6 +18,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
 
 from scripts.config_loader import load_database_config
+from core.database import POSTGRES_SCHEMA_VERSION
 
 
 POSTGRES_IMAGE = "postgres:17-alpine"
@@ -122,7 +123,7 @@ def verify_restore(dump_path: Path) -> None:
             "psql", "-U", "postgres", "-d", "restore_test", "-Atc",
             "SELECT COALESCE(MAX(version),0) FROM schema_migrations;",
         ])
-        if result.stdout.strip() != "1":
+        if result.stdout.strip() != str(POSTGRES_SCHEMA_VERSION):
             raise RuntimeError("La restauration ne contient pas la version de schéma attendue.")
     finally:
         subprocess.run(

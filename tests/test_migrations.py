@@ -1,5 +1,7 @@
 import unittest
+from pathlib import Path
 
+from core.database import POSTGRES_SCHEMA_VERSION
 from scripts.migrate_postgres import migration_files
 
 
@@ -25,6 +27,21 @@ class MigrationDefinitionTest(unittest.TestCase):
         for forbidden_column in ("PASSWORD TEXT", "PASSWORD_HASH", "SECRET TEXT", "TOKEN TEXT"):
             self.assertNotIn(forbidden_column, sql)
         self.assertNotIn("DOCUMENTS", sql)
+
+    def test_readiness_check_tracks_current_schema_and_auth_privileges(self):
+        self.assertEqual(POSTGRES_SCHEMA_VERSION, 2)
+        source = (Path(__file__).parent.parent / "scripts" / "production_readiness.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("version != POSTGRES_SCHEMA_VERSION", source)
+        self.assertIn('"auth_sessions"', source)
+        self.assertIn('(\"INSERT\", \"UPDATE\")', source)
+        self.assertIn("args.require_empty_business_data", source)
+
+        backup_source = (
+            Path(__file__).parent.parent / "scripts" / "backup_postgres.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("str(POSTGRES_SCHEMA_VERSION)", backup_source)
 
 
 if __name__ == "__main__":
